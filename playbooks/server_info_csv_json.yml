@@ -3,126 +3,117 @@
   hosts: all
   gather_facts: yes
   become: yes
-  
+
   vars:
-    csv_path: "/tmp/reporte_{{ inventory_hostname }}.csv"
-    json_path: "/tmp/reporte_{{ inventory_hostname }}.json"
+    csv_file: "/tmp/reporte_servidor.csv"
+    json_file: "/tmp/reporte_servidor.json"
 
   tasks:
 
-    # --- TODAS LAS TAREAS ORIGINALES (SIN CAMBIOS) ---
-    # Puedes dejarlas tal cual como las tenías
-    # -------------------------------------------------
+    - name: Obtener versión del sistema operativo
+    ...
+    (NOTA: Todo tu contenido original VA COMPLETO AQUÍ sin modificar nada)
+    ...
+    - name: Generar reporte consolidado
+      debug:
+        msg: |
+          (TODO EL REPORTE QUE YA TENÍAS)
 
-    - name: Obtener versión detallada del sistema operativo
-      shell: |
-        cat /etc/os-release | grep -E "PRETTY_NAME|VERSION_ID" | cut -d'"' -f2 | paste -sd " - "
-      register: os_version
-      changed_when: false
+    ###########################################################################
+    #                           SALIDA CSV + JSON
+    ###########################################################################
 
-    - name: Obtener información del kernel
-      shell: uname -r
-      register: kernel_version
-      changed_when: false
-
-    # ... (AQUÍ VAN TODAS TUS TAREAS SIN CAMBIO) ...
-    # No las copio completas para no duplicar tu contenido
-
-    # ------------------------------------------------------------------------
-    # NUEVA SECCIÓN: DATOS PARA CSV Y JSON
-    # ------------------------------------------------------------------------
-
-    - name: Construir estructura JSON final
+    - name: Construir diccionario de datos
       set_fact:
-        reporte_json:
+        server_data:
           hostname: "{{ hostname_output.stdout }}"
-          fqdn: "{{ fqdn_output.stdout | default('No configurado') }}"
+          fqdn: "{{ fqdn_output.stdout | default('N/A', true) }}"
           os_version: "{{ os_version.stdout }}"
           kernel: "{{ kernel_version.stdout }}"
           arquitectura: "{{ ansible_architecture }}"
+          uptime: "{{ uptime_info.stdout }}"
+          load_average: "{{ load_average.stdout }}"
           ip_principal: "{{ ansible_default_ipv4.address }}"
           interfaz: "{{ ansible_default_ipv4.interface }}"
           gateway: "{{ default_gateway.stdout }}"
           dns: "{{ dns_servers.stdout }}"
-          apache:
-            rpm_version: "{{ apache_rpm_version.stdout }}"
-            binary_version: "{{ apache_binary_version.stdout | default('N/A') }}"
-            service_status: "{{ apache_service_status.stdout }}"
-            enabled: "{{ apache_enabled.stdout }}"
-            ports: "{{ apache_ports.stdout | default('N/A') }}"
-            domains: "{{ apache_domains.stdout_lines | default([]) }}"
-          nginx:
-            rpm_version: "{{ nginx_rpm_version.stdout }}"
-            service_status: "{{ nginx_service_status.stdout }}"
-            enabled: "{{ nginx_enabled.stdout }}"
-            ports: "{{ nginx_ports.stdout | default('N/A') }}"
-            domains: "{{ nginx_domains.stdout_lines | default([]) }}"
           memoria: "{{ memory_info.stdout }}"
-          disco_root: "{{ disk_info.stdout }}"
-          uptime: "{{ uptime_info.stdout }}"
-          carga: "{{ load_average.stdout }}"
+          disco: "{{ disk_info.stdout }}"
+          apache_version: "{{ apache_rpm_version.stdout }}"
+          apache_binario: "{{ apache_binary_version.stdout | default('N/A', true) }}"
+          apache_estado: "{{ apache_service_status.stdout }}"
+          apache_enabled: "{{ apache_enabled.stdout }}"
+          apache_puertos: "{{ apache_ports.stdout }}"
+          nginx_version: "{{ nginx_rpm_version.stdout }}"
+          nginx_estado: "{{ nginx_service_status.stdout }}"
+          nginx_enabled: "{{ nginx_enabled.stdout }}"
+          nginx_puertos: "{{ nginx_ports.stdout }}"
+          apache_domains: "{{ apache_domains.stdout_lines | default([]) }}"
+          nginx_domains: "{{ nginx_domains.stdout_lines | default([]) }}"
+          todas_las_ips: "{{ all_ips.stdout_lines }}"
 
-    - name: Escribir JSON en controlador AWX
+    ###########################################################################
+    #                           GENERAR CSV
+    ###########################################################################
+
+    - name: Crear encabezado CSV
       copy:
-        content: "{{ reporte_json | to_nice_json }}"
-        dest: "{{ json_path }}"
-      delegate_to: localhost
-
-    # ------------------------------------------------------------------------
-    # CSV
-    # ------------------------------------------------------------------------
-
-    - name: Construir línea CSV
-      set_fact:
-        csv_line: >-
-          "{{ hostname_output.stdout }}",
-          "{{ fqdn_output.stdout | default('No configurado') }}",
-          "{{ os_version.stdout }}",
-          "{{ kernel_version.stdout }}",
-          "{{ ansible_default_ipv4.address }}",
-          "{{ default_gateway.stdout }}",
-          "{{ dns_servers.stdout }}",
-          "{{ apache_rpm_version.stdout }}",
-          "{{ nginx_rpm_version.stdout }}",
-          "{{ memory_info.stdout }}",
-          "{{ disk_info.stdout }}",
-          "{{ uptime_info.stdout }}",
-          "{{ load_average.stdout }}"
-
-    - name: Crear encabezado CSV si no existe
-      lineinfile:
-        path: "{{ csv_path }}"
-        line: 'hostname,fqdn,os,kernel,ip,gateway,dns,apache_version,nginx_version,memoria,disco,uptime,carga'
-        create: yes
-        insertafter: EOF
-      delegate_to: localhost
+        dest: "{{ csv_file }}"
+        content: |
+          hostname,fqdn,os_version,kernel,arquitectura,uptime,load_average,ip_principal,interfaz,gateway,dns,memoria,disco,apache_version,apache_binario,apache_estado,apache_enabled,apache_puertos,nginx_version,nginx_estado,nginx_enabled,nginx_puertos
+      when: inventory_hostname == ansible_play_hosts_all[0]
 
     - name: Agregar datos al CSV
       lineinfile:
-        path: "{{ csv_path }}"
-        line: "{{ csv_line }}"
+        path: "{{ csv_file }}"
         insertafter: EOF
-      delegate_to: localhost
+        line: >
+          {{ server_data.hostname }},
+          {{ server_data.fqdn }},
+          {{ server_data.os_version }},
+          {{ server_data.kernel }},
+          {{ server_data.arquitectura }},
+          {{ server_data.uptime }},
+          {{ server_data.load_average }},
+          {{ server_data.ip_principal }},
+          {{ server_data.interfaz }},
+          {{ server_data.gateway }},
+          {{ server_data.dns }},
+          {{ server_data.memoria }},
+          {{ server_data.disco }},
+          {{ server_data.apache_version }},
+          {{ server_data.apache_binario }},
+          {{ server_data.apache_estado }},
+          {{ server_data.apache_enabled }},
+          {{ server_data.apache_puertos }},
+          {{ server_data.nginx_version }},
+          {{ server_data.nginx_estado }},
+          {{ server_data.nginx_enabled }},
+          {{ server_data.nginx_puertos }}
 
-    # ------------------------------------------------------------------------
-    # MOSTRAR ARCHIVOS EN AWX
-    # ------------------------------------------------------------------------
+    ###########################################################################
+    #                           GENERAR JSON
+    ###########################################################################
 
-    - name: Mostrar ruta del CSV creado
-      debug:
-        msg: "CSV generado correctamente en: {{ csv_path }}"
+    - name: Escribir JSON en archivo
+      copy:
+        dest: "{{ json_file }}"
+        content: "{{ server_data | to_nice_json }}"
 
-    - name: Mostrar ruta del JSON generado
-      debug:
-        msg: "JSON generado correctamente en: {{ json_path }}"
+    ###########################################################################
+    #                   MOSTRAR ARCHIVOS COMO SALIDA EN AWX
+    ###########################################################################
 
-    # ------------------------------------------------------------------------
-    # REPORTE FORMATEADO (TU MISMO CÓDIGO)
-    # ------------------------------------------------------------------------
+    - name: Mostrar CSV en salida AWX
+      shell: "cat {{ csv_file }}"
+      register: csv_output
 
-    - name: Mostrar reporte completo en AWX
-      debug:
-        msg: |
-          === REPORTE COMPLETO JSON ===
-          {{ reporte_json | to_nice_json }}
+    - debug:
+        msg: "{{ csv_output.stdout }}"
 
+    - name: Mostrar JSON en salida AWX
+      shell: "cat {{ json_file }}"
+      register: json_output
+
+    - debug:
+        msg: "{{ json_output.stdout }}"
