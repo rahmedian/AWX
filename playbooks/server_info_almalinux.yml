@@ -168,12 +168,12 @@
       failed_when: false
     
     - name: Obtener uso de memoria
-      shell: free -h | awk 'NR==2{printf "Total: %s | Usado: %s | Libre: %s | Disponible: %s", $2, $3, $4, $7}'
+      shell: 'free -h | awk ''NR==2{printf "Total: %s | Usado: %s | Libre: %s | Disponible: %s", $2, $3, $4, $7}'''
       register: memory_info
       changed_when: false
     
     - name: Obtener uso de disco
-      shell: df -h / | awk 'NR==2{printf "Total: %s | Usado: %s (%s) | Disponible: %s", $2, $3, $5, $4}'
+      shell: 'df -h / | awk ''NR==2{printf "Total: %s | Usado: %s (%s) | Disponible: %s", $2, $3, $5, $4}'''
       register: disk_info
       changed_when: false
     
