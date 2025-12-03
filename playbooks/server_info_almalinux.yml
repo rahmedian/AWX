@@ -2,7 +2,7 @@
 - name: Reporte de Información del Servidor - AlmaLinux 9
   hosts: all
   gather_facts: yes
-  become: yes
+  become: no
   
   vars:
     report_separator: "================================================================"
