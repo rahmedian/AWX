@@ -1,0 +1,78 @@
+---
+- name: Verificación Detallada de Servidores Web - AlmaLinux 9
+  hosts: all
+  gather_facts: no
+  become: yes
+  
+  tasks:
+    - name: Verificar Apache en profundidad
+      shell: |
+        if rpm -q httpd &>/dev/null; then
+          echo "═══════════════════════════════════════════════════════"
+          echo "              INFORMACIÓN DE APACHE"
+          echo "═══════════════════════════════════════════════════════"
+          echo ""
+          echo "📦 RPM Package:"
+          rpm -qi httpd | grep -E "Name|Version|Release|Install Date"
+          echo ""
+          echo "🔧 Versión del binario:"
+          /usr/sbin/httpd -v | head -2
+          echo ""
+          echo "⚙️  Estado del servicio:"
+          systemctl status httpd --no-pager -l | head -10
+          echo ""
+          echo "🔌 Puertos de escucha:"
+          ss -tlnp | grep httpd
+          echo ""
+          echo "📁 Archivos de configuración principales:"
+          ls -lh /etc/httpd/conf/httpd.conf /etc/httpd/conf.d/*.conf 2>/dev/null | awk '{print $9, "("$5")"}'
+          echo ""
+          echo "🌐 Virtual Hosts configurados:"
+          /usr/sbin/httpd -t -D DUMP_VHOSTS 2>&1 | grep -v "Syntax OK"
+          echo ""
+        else
+          echo "❌ Apache (httpd) NO está instalado"
+        fi
+      register: apache_detail
+      changed_when: false
+      failed_when: false
+    
+    - name: Verificar Nginx en profundidad
+      shell: |
+        if rpm -q nginx &>/dev/null; then
+          echo "═══════════════════════════════════════════════════════"
+          echo "               INFORMACIÓN DE NGINX"
+          echo "═══════════════════════════════════════════════════════"
+          echo ""
+          echo "📦 RPM Package:"
+          rpm -qi nginx | grep -E "Name|Version|Release|Install Date"
+          echo ""
+          echo "🔧 Versión del binario:"
+          nginx -v 2>&1
+          echo ""
+          echo "⚙️  Estado del servicio:"
+          systemctl status nginx --no-pager -l | head -10
+          echo ""
+          echo "🔌 Puertos de escucha:"
+          ss -tlnp | grep nginx
+          echo ""
+          echo "📁 Archivos de configuración:"
+          ls -lh /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf 2>/dev/null | awk '{print $9, "("$5")"}'
+          echo ""
+          echo "🌐 Server Blocks configurados:"
+          nginx -T 2>/dev/null | grep -E "server_name|listen" | head -20
+          echo ""
+        else
+          echo "❌ Nginx NO está instalado"
+        fi
+      register: nginx_detail
+      changed_when: false
+      failed_when: false
+    
+    - name: Mostrar información de Apache
+      debug:
+        msg: "{{ apache_detail.stdout_lines }}"
+    
+    - name: Mostrar información de Nginx
+      debug:
+        msg: "{{ nginx_detail.stdout_lines }}"
