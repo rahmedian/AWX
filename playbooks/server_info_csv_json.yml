@@ -233,14 +233,14 @@
 
     - name: Crear archivo JSON
       copy:
-        dest: "/var/lib/awx/projects/_10__informacion_servidores/playbooks/reporte_servidor_{{ inventory_hostname }}.json"
+        dest: "/tmp/reporte_servidor_{{ inventory_hostname }}.json"
         content: "{{ server_report | to_nice_json }}"
       changed_when: false
 
     - name: Descargar JSON a AWX
       fetch:
-        src: "/var/lib/awx/projects/_10__informacion_servidores/playbooks/reporte_servidor_{{ inventory_hostname }}.json"
-        dest: "./"
+        src: "/tmp/reporte_servidor_{{ inventory_hostname }}.json"
+        dest: "/var/lib/awx/projects/_10__informacion_servidores/playbooks/"
         flat: yes
 
 
@@ -283,7 +283,7 @@
     - name: Descargar CSV a AWX
       fetch:
         src: "/tmp/reporte_servidor_{{ inventory_hostname }}.csv"
-        dest: "./"
+        dest: "/var/lib/awx/projects/_10__informacion_servidores/playbooks/"
         flat: yes
 
 
