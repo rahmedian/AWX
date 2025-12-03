@@ -1,308 +1,49 @@
+cat > playbooks/quick_report_almalinux.yml << 'EOF'
 ---
-- name: Reporte de Información del Servidor - AlmaLinux 9
+- name: Reporte Rápido - AlmaLinux 9
   hosts: all
   gather_facts: yes
-  become: no
-  
-  vars:
-    report_separator: "================================================================"
+  become: yes
   
   tasks:
-    # ============================================================
-    # RECOPILACIÓN DE INFORMACIÓN
-    # ============================================================
-    
-    - name: Obtener versión detallada del sistema operativo
+    - name: Recopilar información esencial
       shell: |
-        cat /etc/os-release | grep -E "PRETTY_NAME|VERSION_ID" | cut -d'"' -f2 | paste -sd " - "
-      register: os_version
-      changed_when: false
-    
-    - name: Obtener información del kernel
-      shell: uname -r
-      register: kernel_version
-      changed_when: false
-    
-    - name: Verificar Apache (httpd) - versión
-      shell: |
+        echo "OS=$(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+        echo "KERNEL=$(uname -r)"
+        echo "HOSTNAME=$(hostnamectl --static)"
+        echo "IP=$(ip -4 addr show {{ ansible_default_ipv4.interface }} | grep inet | awk '{print $2}' | cut -d/ -f1)"
+        echo "GATEWAY=$(ip route | grep default | awk '{print $3}')"
+        
         if rpm -q httpd &>/dev/null; then
-          rpm -q httpd --queryformat '%{VERSION}-%{RELEASE}'
+          echo "APACHE=Instalado ($(rpm -q httpd --queryformat '%{VERSION}'))"
+          echo "APACHE_STATUS=$(systemctl is-active httpd)"
         else
-          echo "no_instalado"
+          echo "APACHE=No instalado"
+          echo "APACHE_STATUS=N/A"
         fi
-      register: apache_rpm_version
-      changed_when: false
-    
-    - name: Verificar Apache (httpd) - estado del servicio
-      shell: |
-        if systemctl list-unit-files | grep -q "^httpd.service"; then
-          systemctl is-active httpd
-        else
-          echo "no_instalado"
-        fi
-      register: apache_service_status
-      changed_when: false
-      failed_when: false
-    
-    - name: Verificar Apache (httpd) - enabled/disabled
-      shell: |
-        if systemctl list-unit-files | grep -q "^httpd.service"; then
-          systemctl is-enabled httpd 2>/dev/null || echo "disabled"
-        else
-          echo "no_instalado"
-        fi
-      register: apache_enabled
-      changed_when: false
-      failed_when: false
-    
-    - name: Obtener versión del binario de Apache
-      shell: /usr/sbin/httpd -v | head -n 1 | awk '{print $3}'
-      register: apache_binary_version
-      changed_when: false
-      when: apache_rpm_version.stdout != "no_instalado"
-      failed_when: false
-    
-    - name: Verificar Nginx - versión
-      shell: |
+        
         if rpm -q nginx &>/dev/null; then
-          rpm -q nginx --queryformat '%{VERSION}-%{RELEASE}'
+          echo "NGINX=Instalado ($(rpm -q nginx --queryformat '%{VERSION}'))"
+          echo "NGINX_STATUS=$(systemctl is-active nginx)"
         else
-          echo "no_instalado"
+          echo "NGINX=No instalado"
+          echo "NGINX_STATUS=N/A"
         fi
-      register: nginx_rpm_version
+        
+        echo "UPTIME=$(uptime -p)"
+        echo "LOAD=$(uptime | awk -F'load average:' '{print $2}' | xargs)"
+      register: quick_info
       changed_when: false
     
-    - name: Verificar Nginx - estado del servicio
-      shell: |
-        if systemctl list-unit-files | grep -q "^nginx.service"; then
-          systemctl is-active nginx
-        else
-          echo "no_instalado"
-        fi
-      register: nginx_service_status
-      changed_when: false
-      failed_when: false
-    
-    - name: Verificar Nginx - enabled/disabled
-      shell: |
-        if systemctl list-unit-files | grep -q "^nginx.service"; then
-          systemctl is-enabled nginx 2>/dev/null || echo "disabled"
-        else
-          echo "no_instalado"
-        fi
-      register: nginx_enabled
-      changed_when: false
-      failed_when: false
-    
-    - name: Obtener hostname completo
-      shell: hostnamectl --static
-      register: hostname_output
-      changed_when: false
-    
-    - name: Obtener FQDN
-      shell: hostname -f
-      register: fqdn_output
-      changed_when: false
-      failed_when: false
-    
-    - name: Obtener todas las interfaces de red con IPs
-      shell: |
-        ip -4 addr show | awk '/inet/ {print $NF": "$2}' | column -t
-      register: all_ips
-      changed_when: false
-    
-    - name: Obtener gateway predeterminado
-      shell: ip route | grep default | awk '{print $3}'
-      register: default_gateway
-      changed_when: false
-    
-    - name: Obtener configuración DNS
-      shell: grep -v "^#" /etc/resolv.conf | grep nameserver | awk '{print $2}' | paste -sd ", "
-      register: dns_servers
-      changed_when: false
-    
-    - name: Obtener dominios de Apache - Virtual Hosts
-      shell: |
-        if [ -f /etc/httpd/conf/httpd.conf ]; then
-          # Obtener ServerName y ServerAlias de configuración principal
-          grep -E "^\s*(ServerName|ServerAlias)" /etc/httpd/conf/httpd.conf /etc/httpd/conf.d/*.conf 2>/dev/null | \
-          awk '{print $2}' | grep -v "^$" | sort -u
-        else
-          echo "sin_configurar"
-        fi
-      register: apache_domains
-      changed_when: false
-      when: apache_rpm_version.stdout != "no_instalado"
-      failed_when: false
-    
-    - name: Obtener puertos de escucha de Apache
-      shell: |
-        if systemctl is-active httpd &>/dev/null; then
-          ss -tlnp | grep httpd | awk '{print $4}' | cut -d: -f2 | sort -u | paste -sd ", "
-        else
-          echo "servicio_inactivo"
-        fi
-      register: apache_ports
-      changed_when: false
-      when: apache_rpm_version.stdout != "no_instalado"
-      failed_when: false
-    
-    - name: Obtener dominios de Nginx - Server Blocks
-      shell: |
-        if [ -d /etc/nginx ]; then
-          grep -rh "^\s*server_name" /etc/nginx/conf.d/*.conf /etc/nginx/nginx.conf 2>/dev/null | \
-          awk '{for(i=2;i<=NF;i++) print $i}' | tr -d ';' | grep -v "^$" | grep -v "localhost" | sort -u
-        else
-          echo "sin_configurar"
-        fi
-      register: nginx_domains
-      changed_when: false
-      when: nginx_rpm_version.stdout != "no_instalado"
-      failed_when: false
-    
-    - name: Obtener puertos de escucha de Nginx
-      shell: |
-        if systemctl is-active nginx &>/dev/null; then
-          ss -tlnp | grep nginx | awk '{print $4}' | cut -d: -f2 | sort -u | paste -sd ", "
-        else
-          echo "servicio_inactivo"
-        fi
-      register: nginx_ports
-      changed_when: false
-      when: nginx_rpm_version.stdout != "no_instalado"
-      failed_when: false
-    
-    - name: Obtener uso de memoria
-      shell: free -h | awk 'NR==2{printf "Total: %s | Usado: %s | Libre: %s | Disponible: %s", $2, $3, $4, $7}'
-      register: memory_info
-      changed_when: false
-    
-    - name: Obtener uso de disco
-      shell: df -h / | awk 'NR==2{printf "Total: %s | Usado: %s (%s) | Disponible: %s", $2, $3, $5, $4}'
-      register: disk_info
-      changed_when: false
-    
-    - name: Obtener tiempo de actividad
-      shell: uptime -p
-      register: uptime_info
-      changed_when: false
-    
-    - name: Obtener carga del sistema
-      shell: uptime | awk -F'load average:' '{print $2}' | xargs
-      register: load_average
-      changed_when: false
-    
-    # ============================================================
-    # GENERACIÓN DEL REPORTE
-    # ============================================================
-    
-    - name: Generar reporte consolidado
+    - name: Mostrar reporte rápido
       debug:
         msg: |
           
-          ╔════════════════════════════════════════════════════════════════════════╗
-          ║                REPORTE DE SERVIDOR - ALMALINUX 9                       ║
-          ║                   Generado: {{ ansible_date_time.date }} {{ ansible_date_time.time }}                        ║
-          ╚════════════════════════════════════════════════════════════════════════╝
+          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+          ┃        REPORTE RÁPIDO DEL SERVIDOR           ┃
+          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
           
-          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-          ┃ 📋 INFORMACIÓN DEL SISTEMA                                            ┃
-          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+          {{ quick_info.stdout }}
           
-            • Sistema Operativo : {{ os_version.stdout }}
-            • Kernel            : {{ kernel_version.stdout }}
-            • Arquitectura      : {{ ansible_architecture }}
-            • Tiempo activo     : {{ uptime_info.stdout }}
-            • Carga promedio    : {{ load_average.stdout }}
-          
-          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-          ┃ 🖥️  IDENTIFICACIÓN DEL SERVIDOR                                       ┃
-          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-          
-            • Hostname          : {{ hostname_output.stdout }}
-            • FQDN              : {{ fqdn_output.stdout | default('No configurado', true) }}
-          
-          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-          ┃ 🌐 CONFIGURACIÓN DE RED                                               ┃
-          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-          
-            • IP Principal      : {{ ansible_default_ipv4.address }}
-            • Interfaz          : {{ ansible_default_ipv4.interface }}
-            • Gateway           : {{ default_gateway.stdout }}
-            • Servidores DNS    : {{ dns_servers.stdout | default('No configurados', true) }}
-          
-            Todas las IPs configuradas:
-          {{ all_ips.stdout_lines | map('regex_replace', '^', '      ') | join('\n') }}
-          
-          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-          ┃ 🌍 SERVIDORES WEB INSTALADOS                                          ┃
-          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-          
-          {% if apache_rpm_version.stdout != "no_instalado" %}
-            ┌─ APACHE (HTTPD) ──────────────────────────────────────────────────┐
-            │ Versión RPM       : {{ apache_rpm_version.stdout }}
-            │ Versión Binario   : {{ apache_binary_version.stdout | default('N/A', true) }}
-            │ Estado Servicio   : {{ apache_service_status.stdout | upper }}
-            │ Inicio Automático : {{ apache_enabled.stdout | upper }}
-            │ Puertos Escucha   : {{ apache_ports.stdout | default('N/A', true) }}
-            └───────────────────────────────────────────────────────────────────┘
-          {% else %}
-            ┌─ APACHE (HTTPD) ──────────────────────────────────────────────────┐
-            │ Estado            : ❌ NO INSTALADO
-            └───────────────────────────────────────────────────────────────────┘
-          {% endif %}
-          
-          {% if nginx_rpm_version.stdout != "no_instalado" %}
-            ┌─ NGINX ───────────────────────────────────────────────────────────┐
-            │ Versión RPM       : {{ nginx_rpm_version.stdout }}
-            │ Estado Servicio   : {{ nginx_service_status.stdout | upper }}
-            │ Inicio Automático : {{ nginx_enabled.stdout | upper }}
-            │ Puertos Escucha   : {{ nginx_ports.stdout | default('N/A', true) }}
-            └───────────────────────────────────────────────────────────────────┘
-          {% else %}
-            ┌─ NGINX ───────────────────────────────────────────────────────────┐
-            │ Estado            : ❌ NO INSTALADO
-            └───────────────────────────────────────────────────────────────────┘
-          {% endif %}
-          
-          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-          ┃ 🌐 DOMINIOS Y VIRTUAL HOSTS CONFIGURADOS                              ┃
-          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-          
-          {% if apache_rpm_version.stdout != "no_instalado" %}
-            ┌─ DOMINIOS EN APACHE ──────────────────────────────────────────────┐
-          {% if apache_domains is defined and apache_domains.stdout_lines | length > 0 and apache_domains.stdout != "sin_configurar" %}
-          {% for domain in apache_domains.stdout_lines %}
-            │   • {{ domain }}
-          {% endfor %}
-          {% else %}
-            │   ⚠️  Sin dominios configurados
-          {% endif %}
-            └───────────────────────────────────────────────────────────────────┘
-          {% endif %}
-          
-          {% if nginx_rpm_version.stdout != "no_instalado" %}
-            ┌─ DOMINIOS EN NGINX ───────────────────────────────────────────────┐
-          {% if nginx_domains is defined and nginx_domains.stdout_lines | length > 0 and nginx_domains.stdout != "sin_configurar" %}
-          {% for domain in nginx_domains.stdout_lines %}
-            │   • {{ domain }}
-          {% endfor %}
-          {% else %}
-            │   ⚠️  Sin dominios configurados
-          {% endif %}
-            └───────────────────────────────────────────────────────────────────┘
-          {% endif %}
-          
-          ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-          ┃ 💾 RECURSOS DEL SISTEMA                                               ┃
-          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-          
-            • Memoria RAM       : {{ memory_info.stdout }}
-            • Disco /           : {{ disk_info.stdout }}
-          
-          ╚════════════════════════════════════════════════════════════════════════╝
-          
-                            Reporte generado por AWX/Ansible
-          
-          ════════════════════════════════════════════════════════════════════════
-
+          ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+EOF
