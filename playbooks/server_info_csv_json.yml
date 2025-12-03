@@ -240,7 +240,7 @@
     - name: Descargar JSON a AWX
       fetch:
         src: "/tmp/reporte_servidor_{{ inventory_hostname }}.json"
-        dest: "/var/lib/awx/projects/_10__informacion_servidores/playbooks/"
+        dest: "./"
         flat: yes
 
 
@@ -283,7 +283,7 @@
     - name: Descargar CSV a AWX
       fetch:
         src: "/tmp/reporte_servidor_{{ inventory_hostname }}.csv"
-        dest: "/var/lib/awx/projects/_10__informacion_servidores/playbooks/"
+        dest: "./"
         flat: yes
 
 
