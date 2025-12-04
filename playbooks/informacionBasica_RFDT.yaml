@@ -1,0 +1,9 @@
+---
+- name: Obtener inventario básico del servidor
+  hosts: all
+  gather_facts: yes
+
+  tasks:
+    - name: Mostrar información recopilada
+      debug:
+        var: ansible_facts
