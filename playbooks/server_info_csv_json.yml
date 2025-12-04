@@ -43,7 +43,7 @@
       register: ip_pub_out
 
     - name: Interfaces
-      command: ip -o link show | awk -F': ' '{print $2}'
+      command: "ip -o link show | awk -F': ' '{print $2}'"
       register: ifaces_out
 
     - name: Puertos escuchando
