@@ -1,5 +1,5 @@
 ---
-- name: Inventario COMPLETO Monolítico (AWX) -- Detecta todo: nube, hw, red, servicios, apps, websockets, certs, CSV/JSON
+- name: "Inventario COMPLETO Monolítico (AWX) -- Detecta todo: nube, hw, red, servicios, apps, websockets, certs, CSV/JSON"
   hosts: all
   gather_facts: yes
   become: yes
