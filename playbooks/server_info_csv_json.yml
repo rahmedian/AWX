@@ -511,13 +511,14 @@
           "{{ (os_release_out.stdout | default('')) | replace('\n',' ') | replace(',',';') }}",
           "{{ kernel_out.stdout | default('') }}",
           "{{ vcpu_out.stdout | default('') }}",
-          "{{ (mem_out.stdout | default('') | regex_search('Mem:\\s+(\\d+)', '\\1') ) | default('') }}",
+          "{% set m = mem_out.stdout | regex_search('Mem:\\s+(\\d+)') %}{{ m if m is not none else '' }}",
           "{{ (lsblk_out.stdout | default('')) | replace('\n',' | ') | replace(',',';') }}",
           "{{ ( (nginx_ver.stderr | default('')) ~ ' ' ~ (apache_ver.stdout | default('')) ) | replace(',',';') }}",
           "{{ ( (wordpress_find.stdout|default('')) + '|' + (moodle_find.stdout|default('')) + '|' + (django_find.stdout|default('')) + '|' + (node_find.stdout|default('')) ) | replace('\n',';') | replace(',',';') }}",
           "{{ (heuristics_websockets | join(' || ') ) | replace('\n',';') | default('') }}",
           "{{ (loadavg_out.stdout | default('')) | replace('\n',' ') }}",
           "{{ (top_cpu.stdout | default('')) | replace('\n',' \\n ') | replace(',',';') }}"
+
 
     ####################################################################
     # LIMPIEZA TEMPORAL
