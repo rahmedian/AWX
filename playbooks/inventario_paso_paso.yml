@@ -62,7 +62,7 @@
             }
           }}
 
-    - name: Normalizar disk_total_gb (simple: sumar tamaños reportados si existen)
+    - name: "Normalizar disk_total_gb (simple: sumar tamaños reportados si existen)"
       set_fact:
         disk_total_gb: >-
           {{ 
