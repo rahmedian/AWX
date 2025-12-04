@@ -1,136 +1,107 @@
 ---
-- name: Inventario básico - generar CSV y JSON
+- name: Inventario básico de servidores
   hosts: all
   gather_facts: yes
   become: false
 
   vars:
-    output_dir: "/tmp/inventario_salidas"   # carpeta en el controlador (delegate_to localhost)
-    csv_file: "{{ output_dir }}/inventario.csv"
-    json_file: "{{ output_dir }}/inventario.json"
+    salida_dir: "/runner/project/salida"
+    archivo_json: "inventario_basico.json"
+    archivo_csv: "inventario_basico.csv"
 
   tasks:
-    - name: Asegurar carpeta de salida en controlador
+
+    - name: Crear directorio de salida
       file:
-        path: "{{ output_dir }}"
+        path: "{{ salida_dir }}"
         state: directory
         mode: '0755'
       delegate_to: localhost
-      run_once: true
 
-    - name: Recolectar IPs (interfaces) - construir lista de direcciones IPv4
+    # ----------------------------------------------------------------------
+    # 1. LISTA DE IPS
+    # ----------------------------------------------------------------------
+    - name: Construir lista de IPs
       set_fact:
-        ips_list: >-
-          {{
-            (
-              ansible_facts['interfaces']
-              | map('extract', ansible_facts)
-              | selectattr('ipv4','defined')
-              | map(attribute='ipv4.address')
-              | list
-            )
-          }}
-      when: ansible_facts is defined
+        ips_list: "{{ ansible_all_ipv4_addresses | default([]) }}"
 
-    - name: Construir diccionario de inventario por host
+    - name: Obtener IP primaria
       set_fact:
-        host_inventory: >-
-          {{
-            {
-              'hostname': (ansible_facts['nodename'] | default(ansible_hostname | default(inventory_hostname))),
-              'fqdn': (ansible_facts['fqdn'] | default('')),
-              'os': (ansible_facts['os_family'] ~ " " ~ ansible_facts['distribution'] ~ " " ~ ansible_facts['distribution_version'])|trim,
-              'kernel': ansible_facts['kernel'] | default(''),
-              'uptime': (ansible_facts['uptime_seconds'] | default('')) ,
-              'ips': ips_list | default([]),
-              'primary_ip': (ips_list[0] if (ips_list|length)>0 else ''),
-              'cpu_cores': (ansible_facts['processor_vcpus'] | default(ansible_facts['cpu_cores'] | default(''))),
-              'memory_mb': ( (ansible_facts['memtotal_mb'] | default(0)) | int ),
-              'disk_total_gb': >-
-                {{
-                  (
-                    (ansible_facts['devices'] | default({}))
-                    | dict2items
-                    | map(attribute='value')
-                    | map('extract', {'size': None })
-                    | select()
-                    | map('default', 0)
-                    | list
-                  )
-                }},
-              'ansible_connection': ansible_connection | default('ssh')
-            }
-          }}
+        primary_ip: "{{ ips_list[0] if ips_list | length > 0 else '' }}"
 
-    - name: "Normalizar disk_total_gb (simple: sumar tamaños reportados si existen)"
+    # ----------------------------------------------------------------------
+    # 2. DISCO TOTAL EN GB
+    # ----------------------------------------------------------------------
+    - name: Calcular disco total en GB (a partir de mounts)
       set_fact:
         disk_total_gb: >-
-          {{ 
-            (ansible_facts['ansible_mounts'] 
-              | default([]) 
-              | map(attribute='size_total') 
-              | select() 
-              | map('int') 
-              | sum) 
-            // 1024 // 1024 if (ansible_facts['ansible_mounts'] | default([]) | length) > 0 else 0
+          {{
+            (
+              ansible_mounts
+              | map(attribute='size_total')
+              | select()
+              | map('int')
+              | sum
+            ) // 1024 // 1024 // 1024
+            if ansible_mounts is defined else 0
           }}
-      when: ansible_facts is defined
 
-    - name: Añadir disk_total_gb al host_inventory
+    # ----------------------------------------------------------------------
+    # 3. INVENTARIO POR HOST
+    # ----------------------------------------------------------------------
+    - name: Construir diccionario del inventario por host
       set_fact:
-        host_inventory: "{{ host_inventory | combine({'disk_total_gb': disk_total_gb}) }}"
+        host_inventory:
+          hostname: "{{ ansible_nodename | default(inventory_hostname) }}"
+          fqdn: "{{ ansible_facts.fqdn | default('') }}"
+          os: "{{ ansible_facts.os_family }} {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          kernel: "{{ ansible_facts.kernel }}"
+          uptime_seconds: "{{ ansible_facts.uptime_seconds | default(0) }}"
+          ips: "{{ ips_list }}"
+          primary_ip: "{{ primary_ip }}"
+          cpu_cores: "{{ ansible_facts.processor_vcpus | default(ansible_facts.cpu_cores | default(0)) }}"
+          memory_mb: "{{ ansible_facts.memtotal_mb | default(0) }}"
+          disk_total_gb: "{{ disk_total_gb }}"
+          connection: "{{ ansible_connection | default('ssh') }}"
 
-    - name: Agregar entrada de host al registro global (lista de hosts)
+    # ----------------------------------------------------------------------
+    # 4. CONSTRUIR INVENTARIO GLOBAL
+    # ----------------------------------------------------------------------
+    - name: Agregar host a lista global
       set_fact:
-        inventories_list: "{{ (inventories_list | default([])) + [ host_inventory ] }}"
+        inventario_global: "{{ (inventario_global | default([])) + [ host_inventory ] }}"
       run_once: false
 
-    - name: Esperar a que todos los hosts terminen (sincrónico)
-      meta: flush_handlers
-
-    - name: Guardar JSON completo (todos los hosts) en controlador
+    # ----------------------------------------------------------------------
+    # 5. GUARDAR JSON (solo una vez)
+    # ----------------------------------------------------------------------
+    - name: Guardar inventario completo en JSON
       copy:
-        content: "{{ inventories_list | default([]) | to_nice_json }}"
-        dest: "{{ json_file }}"
-        mode: '0644'
+        dest: "{{ salida_dir }}/{{ archivo_json }}"
+        content: "{{ inventario_global | to_nice_json }}"
       delegate_to: localhost
       run_once: true
 
-    - name: Crear/actualizar CSV (encabezado + filas) en controlador
-      delegate_to: localhost
-      run_once: true
-      block:
-        - name: Construir encabezado CSV
-          set_fact:
-            csv_header: "hostname,fqdn,primary_ip,ips,os,kernel,uptime_seconds,cpu_cores,memory_mb,disk_total_gb,ansible_connection"
-
-        - name: Construir líneas CSV
-          set_fact:
-            csv_lines: >-
-              {{
-                (
-                  inventories_list | default([])
-                )
-                | map('combine', {})
-                | map('community.general.json_query', '@')  # passthrough - safe transform
-                | map('to_nice_json')   # temporary representation
-                | list
-              }}
-
-        - name: Render CSV final (plantilla simple)
-          copy:
-            dest: "{{ csv_file }}"
-            content: |
-              {{ csv_header }}
-              {%- for host in inventories_list | default([]) -%}
-              {{ host.hostname | default('') }},{{ host.fqdn | default('') }},{{ host.primary_ip | default('') }},{{ host.ips | join(';') }},{{ host.os | replace(',', ' ') }},{{ host.kernel }},{{ host.uptime }},{{ host.cpu_cores }},{{ host.memory_mb }},{{ host.disk_total_gb }},{{ host.ansible_connection }}
-              {%- endfor -%}
-            mode: '0644'
-
-    - name: Mostrar ubicación de archivos (resumen)
-      debug:
-        msg:
-          - "CSV: {{ csv_file }}"
-          - "JSON: {{ json_file }}"
+    # ----------------------------------------------------------------------
+    # 6. GUARDAR CSV (solo una vez)
+    # ----------------------------------------------------------------------
+    - name: Generar CSV
+      copy:
+        dest: "{{ salida_dir }}/{{ archivo_csv }}"
+        content: |
+          hostname,fqdn,os,kernel,uptime_seconds,primary_ip,ips,cpu_cores,memory_mb,disk_total_gb,connection
+          {% for item in inventario_global %}
+          {{ item.hostname }},
+          {{ item.fqdn }},
+          {{ item.os }},
+          {{ item.kernel }},
+          {{ item.uptime_seconds }},
+          {{ item.primary_ip }},
+          "{{ item.ips | join(' ') }}",
+          {{ item.cpu_cores }},
+          {{ item.memory_mb }},
+          {{ item.disk_total_gb }},
+          {{ item.connection }}
+          {% endfor %}
       delegate_to: localhost
       run_once: true
