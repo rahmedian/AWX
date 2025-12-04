@@ -1,67 +1,68 @@
 ---
-- name: "Inventario COMPLETO Monolítico (AWX) -- Detecta todo: nube, hw, red, servicios, apps, websockets, certs, CSV/JSON"
+- name: Inventario ESPECÍFICO Monolítico (AWX) - copia por host al controlador
   hosts: all
   gather_facts: yes
   become: yes
+
   vars:
     reporte_json: "/tmp/inventario_{{ inventory_hostname }}.json"
     reporte_csv: "/tmp/inventario_{{ inventory_hostname }}.csv"
     tmp_dir: "/tmp/inventario_tmp_{{ inventory_hostname }}"
-    # timeout para consultas metadata
     md_timeout: 2
+    awx_base_dir: "/var/lib/awx/projects/informes"   # ruta en el controlador AWX donde se guardarán los archivos
 
   pre_tasks:
-    - name: Crear directorio temporal
+    - name: Crear directorio temporal en host
       file:
         path: "{{ tmp_dir }}"
         state: directory
         mode: '0755'
 
+    # Crear ruta en el controlador AWX para este host (delegate_to localhost)
+    - name: Crear carpeta destino en controlador AWX para el host (si no existe)
+      file:
+        path: "{{ awx_base_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: false
+
   tasks:
-    ####################################################################
-    # IDENTIDAD / SISTEMA
-    ####################################################################
+    ###############
+    # IDENTIDAD
+    ###############
     - name: Obtener hostname
       command: hostname
       register: hostname_out
+      changed_when: false
 
     - name: Obtener fqdn (si aplica)
       command: hostname -f
       register: fqdn_out
       failed_when: false
+      changed_when: false
 
     - name: Obtener kernel
       command: uname -r
       register: kernel_out
+      changed_when: false
 
-    - name: Obtener /etc/os-release (si existe)
-      command: cat /etc/os-release
-      register: os_release_out
+    - name: Obtener OS (NAME + VERSION) desde /etc/os-release
+      shell: |
+        if [ -f /etc/os-release ]; then
+          . /etc/os-release
+          printf "%s %s" "${NAME:-}" "${VERSION_ID:-}"
+        else
+          uname -s
+        fi
+      register: os_out
+      changed_when: false
       failed_when: false
 
-    - name: Obtener uptime
-      command: cat /proc/uptime
-      register: uptime_out
-      failed_when: false
-
-    - name: Fecha actual host
-      command: date --iso-8601=seconds
-      register: fecha_out
-      failed_when: false
-
-    ####################################################################
-    # NUBE / METADATA
-    ####################################################################
-    - name: AWS - Instance identity document
-      uri:
-        url: http://169.254.169.254/latest/dynamic/instance-identity/document
-        method: GET
-        return_content: yes
-        timeout: "{{ md_timeout }}"
-      register: aws_identity
-      failed_when: false
-
-    - name: AWS - instance-id (IMDSv1 fallback)
+    ###############
+    # NUBE / PROVEEDOR
+    ###############
+    - name: Intentar AWS - instance-id
       uri:
         url: http://169.254.169.254/latest/meta-data/instance-id
         method: GET
@@ -69,12 +70,19 @@
         timeout: "{{ md_timeout }}"
       register: aws_instance_id
       failed_when: false
+      changed_when: false
 
-    - name: AWS - tags not available via metadata by default (we collect instance-id for external mapping)
-      set_fact:
-        aws_tags_available: false
+    - name: Intentar AWS - region
+      uri:
+        url: http://169.254.169.254/latest/dynamic/instance-identity/document
+        method: GET
+        return_content: yes
+        timeout: "{{ md_timeout }}"
+      register: aws_identity_doc
+      failed_when: false
+      changed_when: false
 
-    - name: GCP - zone
+    - name: Intentar GCP - zone
       uri:
         url: http://169.254.169.254/computeMetadata/v1/instance/zone
         method: GET
@@ -84,19 +92,9 @@
         timeout: "{{ md_timeout }}"
       register: gcp_zone
       failed_when: false
+      changed_when: false
 
-    - name: GCP - attributes (may include custom metadata/tags)
-      uri:
-        url: http://169.254.169.254/computeMetadata/v1/instance/attributes/?recursive=true
-        method: GET
-        headers:
-          Metadata-Flavor: Google
-        return_content: yes
-        timeout: "{{ md_timeout }}"
-      register: gcp_attributes
-      failed_when: false
-
-    - name: Azure - metadata (compute)
+    - name: Intentar Azure - vmSize
       uri:
         url: "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01"
         method: GET
@@ -106,434 +104,344 @@
         timeout: "{{ md_timeout }}"
       register: azure_compute
       failed_when: false
+      changed_when: false
 
-    - name: Azure - tags (if any)
-      uri:
-        url: "http://169.254.169.254/metadata/instance/compute/tagsList?api-version=2021-02-01"
-        method: GET
-        headers:
-          Metadata: "true"
-        return_content: yes
-        timeout: "{{ md_timeout }}"
-      register: azure_tags
-      failed_when: false
+    - name: Determinar proveedor y datos relevantes
+      set_fact:
+        cloud_provider: >-
+          {% if aws_instance_id.content is defined and aws_instance_id.content|length > 0 %}
+            aws
+          {% elif gcp_zone.content is defined and gcp_zone.content|length > 0 %}
+            gcp
+          {% elif azure_compute.content is defined and azure_compute.content|length > 0 %}
+            azure
+          {% else %}
+            unknown
+          {% endif %}
+        cloud_instance_id: >-
+          {% if aws_instance_id.content is defined and aws_instance_id.content|length > 0 %}
+            {{ aws_instance_id.content }}
+          {% elif gcp_zone.content is defined and gcp_zone.content|length > 0 %}
+            {{ (gcp_zone.content.split('/')[-1]) }}
+          {% elif azure_compute.content is defined and (azure_compute.content | from_json).vmId is defined %}
+            {{ (azure_compute.content | from_json).vmId }}
+          {% else %}
+            ''
+          {% endif %}
+        cloud_region: >-
+          {% if aws_identity_doc.content is defined and aws_identity_doc.content|length > 0 %}
+            {{ (aws_identity_doc.content | from_json).region if (aws_identity_doc.content | from_json).region is defined else '' }}
+          {% elif gcp_zone.content is defined and gcp_zone.content|length > 0 %}
+            {{ gcp_zone.content.split('/')[-1] }}
+          {% elif azure_compute.content is defined and azure_compute.content|length > 0 %}
+            {{ (azure_compute.content | from_json).location if (azure_compute.content | from_json).location is defined else '' }}
+          {% else %}
+            ''
+          {% endif %}
 
-    ####################################################################
+    ###############
     # RED
-    ####################################################################
-    - name: Obtener IP pública (servicio ifconfig.me)
+    ###############
+    - name: Obtener IP pública (servicio externo, puede fallar)
       command: curl -s --max-time 5 ifconfig.me || true
       register: ip_publica
       failed_when: false
+      changed_when: false
 
-    - name: Obtener IPs privadas (hostname -I)
+    - name: Obtener IPs privadas
       command: hostname -I
       register: ip_privadas
       failed_when: false
-
-    - name: FQDN / resolv
-      command: cat /etc/hosts
-      register: hosts_out
-      failed_when: false
-
-    - name: Default gateway
-      command: ip route show default
-      register: default_route
-      failed_when: false
+      changed_when: false
 
     - name: Interfaces y direcciones
       command: ip -o addr show
       register: ip_addr
       failed_when: false
+      changed_when: false
 
-    - name: Listar sockets escuchando (ss)
+    - name: Listar sockets y puertos escuchando (ss)
       command: ss -tunlp
       register: sockets_list
       failed_when: false
-
-    - name: Listar sockets escuchando (netstat fallback)
-      command: netstat -tunlp
-      register: netstat_list
-      failed_when: false
-
-    - name: Escaneo de puertos (nmap - puede no estar instalado)
-      command: nmap -p- --min-rate=1000 -T4 {{ ansible_default_ipv4.address | default('127.0.0.1') }}
-      register: nmap_out
-      failed_when: false
       changed_when: false
 
-    ####################################################################
-    # HARDWARE / VM SPEC
-    ####################################################################
+    - name: Formatear puertos escuchando con servicio (guardado seguro)
+      set_fact:
+        puertos_escuchando: >-
+          {{
+            (sockets_list.stdout_lines | default([]))
+            | map('trim') | list
+          }}
+      failed_when: false
+
+    ###############
+    # HARDWARE
+    ###############
     - name: vCPU (nproc)
       command: nproc
       register: vcpu_out
       failed_when: false
+      changed_when: false
 
-    - name: Memoria (free -m)
+    - name: Memoria (free -m) y extraer RAM total (MB)
       command: free -m
       register: mem_out
       failed_when: false
+      changed_when: false
+
+    - name: Extraer RAM total en GB (seguro)
+      set_fact:
+        ram_mb_match: "{{ (mem_out.stdout | regex_search('Mem:\\s+(\\d+)', '\\1')) | default('') }}"
+      failed_when: false
+
+    - name: Establecer ram_gb fact
+      set_fact:
+        ram_gb: >-
+          {% if ram_mb_match | string | length > 0 %}
+            {{ (ram_mb_match | int / 1024) | round(2) }}
+          {% else %}
+            ''
+          {% endif %}
 
     - name: Discos (lsblk)
-      command: lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
+      command: lsblk -b -o NAME,SIZE,TYPE,MOUNTPOINT
       register: lsblk_out
       failed_when: false
+      changed_when: false
 
-    - name: Tipo de instancia inteligible (si disponible en AWS identity document)
+    - name: Calcular disco total (suma de TYPE==disk) en GB (heurística segura)
       set_fact:
-        instance_type: "{{ (aws_identity.content | from_json).instanceType if aws_identity.content is defined and aws_identity.content|length > 0 else (azure_compute.content | from_json).vmSize if azure_compute.content is defined and azure_compute.content|length > 0 else 'N/A' }}"
-      failed_when: false
+        disco_total_gb: >-
+          {% set total = 0 %}
+          {% for l in (lsblk_out.stdout_lines | default([])) %}
+            {% set parts = l.split() %}
+            {% if parts|length >= 2 and parts[1].isdigit() %}
+              {% set total = total + (parts[1] | int) %}
+            {% endif %}
+          {% endfor %}
+          {% if total > 0 %}
+            {{ (total / 1024 / 1024 / 1024) | round(2) }}
+          {% else %}
+            ''
+          {% endif %}
 
-    ####################################################################
-    # SISTEMA / PAQUETES / SERVICIOS
-    ####################################################################
-    - name: Listar unidades systemd activas (running)
+    ###############
+    # SERVICIOS / PROCESOS / PAQUETES
+    ###############
+    - name: Servicios systemd activos
       command: systemctl list-units --type=service --state=running --no-pager --no-legend
       register: systemd_running
       failed_when: false
+      changed_when: false
 
-    - name: Listar procesos (ps aux)
-      command: ps aux
-      register: ps_aux
+    - name: Procesos (ps)
+      command: ps -eo pid,comm,args --no-headers
+      register: ps_list
       failed_when: false
+      changed_when: false
 
-    - name: Listar paquetes RPM/Dpkg
+    - name: Listado de paquetes (limitado) - rpm/dpkg
       shell: |
-        if command -v rpm >/dev/null 2>&1; then rpm -qa; elif command -v dpkg >/dev/null 2>&1; then dpkg -l; else echo "no-pkg-manager"; fi
-      register: paquetes_list
+        if command -v rpm >/dev/null 2>&1; then rpm -qa | head -n 200;
+        elif command -v dpkg >/dev/null 2>&1; then dpkg -l | head -n 200;
+        else echo "no-pkg-manager";
+        fi
+      register: packages_list
       failed_when: false
+      changed_when: false
 
-    - name: Obtener salida de 'uname -a'
-      command: uname -a
-      register: uname_a
-      failed_when: false
-
-    - name: Obtener lista de kernels instalados (rpm/dpkg heurística)
-      shell: |
-        if command -v rpm >/dev/null 2>&1; then rpm -qa kernel\* || true; elif command -v dpkg >/dev/null 2>&1; then dpkg -l | grep linux-image || true; else echo "no-kernel-list"; fi
-      register: kernels_list
-      failed_when: false
-
-    ####################################################################
-    # SERVIDORES WEB / VHOSTS / CERTS / SSL
-    ####################################################################
-    - name: Detectar nginx - versión
+    ###############
+    # WEB / APPS / VHOSTS / CERTS
+    ###############
+    - name: Detectar nginx versión
       command: nginx -v
       register: nginx_ver
       failed_when: false
       changed_when: false
 
-    - name: Detectar apache/httpd - version
+    - name: Detectar apache/httpd versión
       command: apachectl -v || httpd -v
       register: apache_ver
       failed_when: false
       changed_when: false
 
-    - name: Listar vhosts nginx (sites-enabled and conf.d)
+    - name: Listar vhosts (nginx & apache) - paths comunes
       shell: |
-        find /etc/nginx -type f -name '*.conf' -maxdepth 4 2>/dev/null || true
-      register: nginx_vhosts
+        find /etc/nginx /etc/apache2 /etc/httpd /etc -type f -name '*.conf' -maxdepth 4 2>/dev/null || true
+      register: vhosts_list
       failed_when: false
+      changed_when: false
 
-    - name: Listar vhosts apache (sites-enabled and conf.d)
+    - name: Buscar primeros certificados SSL comunes (letsencrypt, /etc/ssl, /etc/pki)
       shell: |
-        find /etc/apache2 -type f -name '*.conf' -maxdepth 4 2>/dev/null || find /etc/httpd -type f -name '*.conf' -maxdepth 4 2>/dev/null || true
-      register: apache_vhosts
-      failed_when: false
-
-    - name: Buscar certificados SSL comunes en /etc
-      shell: |
-        find /etc -type f \( -name '*.crt' -o -name '*.pem' -o -name '*.key' \) -maxdepth 6 2>/dev/null || true
+        find /etc/letsencrypt /etc/ssl /etc/pki /etc/nginx -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) 2>/dev/null | head -n 10 || true
       register: certs_found
       failed_when: false
+      changed_when: false
 
-    - name: Probar certificados encontrados (openssl x509 -noout -text) - solo primeros 20 para performance
+    - name: Extraer CN y fechas del primer certificado encontrado (si existe)
       shell: |
-        for f in $(echo "{{ certs_found.stdout | default('') }}" | head -n 20); do
-          if [ -f "$f" ]; then
-            echo "FILE::: $f"
-            openssl x509 -in "$f" -noout -subject -issuer -dates -serial 2>/dev/null || true
-          fi
-        done
-      register: certs_info
+        f=$(echo "{{ certs_found.stdout | default('') }}" | head -n1)
+        if [ -n "$f" ] && [ -f "$f" ]; then
+          openssl x509 -in "$f" -noout -subject -startdate -enddate 2>/dev/null | sed -n '1,3p'
+        else
+          echo ""
+        fi
+      register: cert_first_info
       failed_when: false
+      changed_when: false
 
-    ####################################################################
-    # WEBSOCKETS DETECCIÓN (heurística)
-    ####################################################################
-    - name: Buscar dependencias websocket en package.json (node) si existe
+    - name: Detectar aplicaciones (WP, Moodle, Laravel, Django, Node)
       shell: |
-        grep -R --line-number -e '"socket.io"' -e '"ws"' -e '"websocket"' -n /var/www /opt /home 2>/dev/null | head -n 200 || true
-      register: node_ws_pkg
+        out=""
+        wp=$(find /var/www -maxdepth 5 -type f -name 'wp-config.php' 2>/dev/null | head -n1)
+        if [ -n "$wp" ]; then out="$out|wordpress:$wp"; fi
+        mood=$(find /var/www -maxdepth 6 -type f -name 'config.php' 2>/dev/null | xargs -r grep -l "moodle" 2>/dev/null | head -n1)
+        if [ -n "$mood" ]; then out="$out|moodle:$mood"; fi
+        lar=$(find /var/www /opt /home -maxdepth 5 -type f -name 'artisan' 2>/dev/null | head -n1)
+        if [ -n "$lar" ]; then out="$out|laravel:$lar"; fi
+        dj=$(find /var/www /opt /home -maxdepth 5 -type f -name 'manage.py' 2>/dev/null | head -n1)
+        if [ -n "$dj" ]; then out="$out|django:$dj"; fi
+        node=$(find /var/www /opt /home -maxdepth 5 -type f -name 'package.json' 2>/dev/null | head -n1)
+        if [ -n "$node" ]; then out="$out|node:$node"; fi
+        echo "${out#|}"
+      register: apps_detected
       failed_when: false
+      changed_when: false
 
-    - name: Buscar uso de 'websocket' en archivos Python (Django Channels, websockets)
+    ###############
+    # WEBSOCKETS - detección más completa
+    ###############
+    - name: Buscar patrones websocket en package.json y procesos (node/ws, socket.io)
       shell: |
-        grep -R --line-number -e "channels" -e "websocket" -e "asgiref" /var/www /opt /home 2>/dev/null | head -n 200 || true
-      register: py_ws_pkg
+        grep -R --line-number -E '"socket.io"|"ws"|"websocket"' /var/www /opt /home 2>/dev/null | head -n 100 || true
+      register: ws_pkg_patterns
       failed_when: false
+      changed_when: false
 
-    - name: Buscar procesos node que puedan ser websocket (pm2, node)
+    - name: Buscar referencias websocket en procesos Java/Python (spring, channels)
       shell: |
-        ps aux | egrep 'node|pm2' | egrep -v 'egrep' || true
-      register: node_procs
+        ps aux | egrep -i 'java|python' | egrep -i 'spring|websocket|channels|tomcat|jetty' || true
+      register: ws_process_patterns
       failed_when: false
+      changed_when: false
 
-    - name: Buscar jars java con clase websocket (Spring, Tomcat websockets)
-      shell: |
-        ps aux | egrep 'java' | egrep -v 'egrep' || true
-      register: java_procs
-      failed_when: false
-
-    - name: Heurística websockets - detectar patrones en procesos/sockets
+    - name: Construir heurística enriquecida de websockets
       set_fact:
-        heuristics_websockets: >-
+        websockets_detected: >-
           {{
             (
-              (node_ws_pkg.stdout_lines | default([])) +
-              (py_ws_pkg.stdout_lines | default([])) +
-              (node_procs.stdout_lines | default([])) +
-              (java_procs.stdout_lines | default([])) +
+              (ws_pkg_patterns.stdout_lines | default([])) +
+              (ws_process_patterns.stdout_lines | default([])) +
               (sockets_list.stdout_lines | default([]))
             ) | unique
           }}
       failed_when: false
 
-    ####################################################################
-    # APLICACIONES ESPECÍFICAS (heurísticas)
-    ####################################################################
-    - name: Detectar WordPress (buscando wp-config.php)
-      shell: |
-        find /var/www -maxdepth 4 -type f -name 'wp-config.php' 2>/dev/null | head -n 20 || true
-      register: wordpress_find
-      failed_when: false
-
-    - name: Detectar Moodle (config.php en moodle)
-      shell: |
-        find /var/www -maxdepth 6 -type f -name 'config.php' | xargs -r grep -l "moodle" 2>/dev/null | head -n 20 || true
-      register: moodle_find
-      failed_when: false
-
-    - name: Detectar Tomcat (catalina.sh o /usr/share/tomcat)
-      shell: |
-        if [ -d /usr/share/tomcat ] || [ -f /usr/share/tomcat/bin/catalina.sh ] || ps aux | grep -v grep | grep -i catalina || true; then echo "tomcat-possible"; fi
-      register: tomcat_find
-      failed_when: false
-
-    - name: Detectar Django (manage.py)
-      shell: |
-        find /var/www /opt /home -type f -name 'manage.py' 2>/dev/null | head -n 50 || true
-      register: django_find
-      failed_when: false
-
-    - name: Detectar Node.js apps (package.json)
-      shell: |
-        find /var/www /opt /home -type f -name 'package.json' 2>/dev/null | head -n 200 || true
-      register: node_find
-      failed_when: false
-
-    - name: Detectar Laravel (artisan file)
-      shell: |
-        find /var/www /opt /home -type f -name 'artisan' 2>/dev/null | head -n 50 || true
-      register: laravel_find
-      failed_when: false
-
-    - name: Detectar Spring Boot (jar con spring-boot, procesos java)
-      shell: |
-        ps aux | grep -i spring | grep -v grep || true
-      register: spring_find
-      failed_when: false
-
-    - name: Generic web apps - buscar index.php, index.html
-      shell: |
-        find /var/www -maxdepth 5 -type f \( -name 'index.php' -o -name 'index.html' \) 2>/dev/null | head -n 200 || true
-      register: generic_webfiles
-      failed_when: false
-
-    ####################################################################
-    # METRICS / USO EN TIEMPO REAL (instant snapshot)
-    ####################################################################
-    - name: Obtener carga promedio (loadavg)
-      command: cat /proc/loadavg
-      register: loadavg_out
-      failed_when: false
-
-    - name: Top 5 procesos por CPU
-      shell: ps aux --sort=-%cpu | head -n 6
-      register: top_cpu
-      failed_when: false
-
-    - name: Top 5 procesos por memoria
-      shell: ps aux --sort=-%mem | head -n 6
-      register: top_mem
-      failed_when: false
-
-    - name: Uso disco (df -h)
-      command: df -h
-      register: df_out
-      failed_when: false
-
-    ####################################################################
-    # BINDINGS / LOAD BALANCERS (heurística via metadata & routes)
-    ####################################################################
-    - name: Detectar AWS ELB/ALB - revisar si hay ip pública y tags en metadata (heurística)
-      set_fact:
-        aws_elb_hint: >-
-          {% if aws_identity.content is defined and aws_identity.content|length > 0 %}
-            {{ (aws_identity.content | from_json).instanceId if (aws_identity.content | from_json).instanceId is defined else 'N/A' }}
-          {% else %}
-            N/A
-          {% endif %}
-      failed_when: false
-
-    - name: Detectar posible balanceador en frontales (revisar X-Forwarded-For en logs - example Nginx)
-      shell: |
-        grep -R "X-Forwarded-For" /var/log/nginx 2>/dev/null | head -n 20 || true
-      register: xff_logs
-      failed_when: false
-
-    ####################################################################
-    # RECOLECTAR ARCHIVOS DE LOG / BANNERS / BANNERS HTTP
-    ####################################################################
-    - name: Banner HTTP (curl -I localhost ports common)
-      shell: |
-        for p in 80 443 8080 8000 3000; do
-          timeout 3 bash -c "echo | curl -sI --max-time 3 http://127.0.0.1:$p 2>/dev/null | sed -n '1,6p' && echo '---';" || true
-        done
-      register: http_banners
-      failed_when: false
-
-    - name: Obtener banners de servicios via /etc/services (ejemplo)
-      command: cat /etc/services
-      register: etc_services
-      failed_when: false
-
-    ####################################################################
-    # AGREGAR META: etiquetas del inventario / Ansible vars (si existen)
-    ####################################################################
-    - name: Obtener tags/labels provistos por inventory vars (si aplica)
-      set_fact:
-        inventory_tags: "{{ hostvars[inventory_hostname].tags if hostvars[inventory_hostname].tags is defined else (hostvars[inventory_hostname].tag if hostvars[inventory_hostname].tag is defined else {}) }}"
-
-    ####################################################################
-    # CREAR SALIDA JSON POR HOST
-    ####################################################################
-    - name: Construir JSON final y guardarlo en {{ reporte_json }}
+    ###############
+    # SALIDA JSON
+    ###############
+    - name: Crear JSON compacto por host
       copy:
         dest: "{{ reporte_json }}"
         content: |
           {
-            "collected_at": "{{ fecha_out.stdout | default('') }}",
             "inventory_hostname": "{{ inventory_hostname }}",
             "hostname": "{{ hostname_out.stdout | default('') }}",
             "fqdn": "{{ fqdn_out.stdout | default('') }}",
+            "os": "{{ os_out.stdout | default('') }}",
             "kernel": "{{ kernel_out.stdout | default('') }}",
-            "uname_a": "{{ uname_a.stdout | default('') | replace('\n',' ') }}",
-            "os_release": {{ os_release_out.stdout | default('') | to_json }},
-            "uptime": "{{ uptime_out.stdout | default('') }}",
-            "cloud": {
-              "aws_identity": {{ aws_identity.content | default('') | to_json }},
-              "aws_instance_id": "{{ aws_instance_id.content | default('') }}",
-              "gcp_zone": "{{ gcp_zone.content | default('') }}",
-              "gcp_attributes": {{ gcp_attributes.content | default('') | to_json }},
-              "azure_compute": {{ azure_compute.content | default('') | to_json }},
-              "azure_tags": {{ azure_tags.content | default('') | to_json }}
-            },
             "network": {
+              "ip_privada": "{{ ip_privadas.stdout | default('') | replace('\n',' ') }}",
               "ip_publica": "{{ ip_publica.stdout | default('') }}",
-              "ip_privadas": {{ ip_privadas.stdout | default('') | to_json }},
-              "default_route": {{ default_route.stdout | default('') | to_json }},
-              "ip_addr": {{ ip_addr.stdout | default('') | to_json }},
-              "sockets_ss": {{ sockets_list.stdout | default('') | to_json }},
-              "netstat": {{ netstat_list.stdout | default('') | to_json }},
-              "nmap": {{ nmap_out.stdout | default('') | to_json }}
+              "interfaces": {{ ip_addr.stdout | default('') | to_json }},
+              "puertos_escuchando": {{ puertos_escuchando | to_json }}
             },
             "hardware": {
               "vcpu": "{{ vcpu_out.stdout | default('') }}",
-              "mem": {{ mem_out.stdout | default('') | to_json }},
-              "discos": {{ lsblk_out.stdout | default('') | to_json }},
-              "instance_type_hint": "{{ instance_type | default('') }}"
+              "ram_gb": "{{ ram_gb | default('') }}",
+              "disco_total_gb": "{{ disco_total_gb | default('') }}"
+            },
+            "cloud": {
+              "provider": "{{ cloud_provider }}",
+              "instance_id": "{{ cloud_instance_id | default('') }}",
+              "region": "{{ cloud_region | default('') }}"
             },
             "services": {
               "systemd_running": {{ systemd_running.stdout | default('') | to_json }},
-              "ps_aux": {{ ps_aux.stdout | default('') | to_json }},
-              "packages": {{ paquetes_list.stdout | default('') | to_json }},
-              "kernels_list": {{ kernels_list.stdout | default('') | to_json }}
+              "processes": {{ ps_list.stdout | default('') | to_json }},
+              "packages_sample": {{ packages_list.stdout | default('') | to_json }}
             },
             "web": {
-              "nginx": "{{ nginx_ver.stderr | default(nginx_ver.stdout) | default('') }}",
-              "apache": "{{ apache_ver.stdout | default('') }}",
-              "nginx_vhosts": {{ nginx_vhosts.stdout | default('') | to_json }},
-              "apache_vhosts": {{ apache_vhosts.stdout | default('') | to_json }},
-              "certs_found": {{ certs_found.stdout | default('') | to_json }},
-              "certs_info": {{ certs_info.stdout | default('') | to_json }},
-              "http_banners": {{ http_banners.stdout | default('') | to_json }}
+              "nginx_version": "{{ nginx_ver.stderr | default(nginx_ver.stdout) | default('') }}",
+              "apache_version": "{{ apache_ver.stdout | default('') }}",
+              "vhosts_sample": {{ vhosts_list.stdout | default('') | to_json }},
+              "first_cert_info": "{{ cert_first_info.stdout | default('') }}",
+              "apps_detected": "{{ apps_detected.stdout | default('') }}"
             },
-            "websockets_heuristics": {{ heuristics_websockets | to_json }},
-            "apps_detected": {
-              "wordpress": {{ wordpress_find.stdout | default('') | to_json }},
-              "moodle": {{ moodle_find.stdout | default('') | to_json }},
-              "tomcat": {{ tomcat_find.stdout | default('') | to_json }},
-              "django": {{ django_find.stdout | default('') | to_json }},
-              "node_apps": {{ node_find.stdout | default('') | to_json }},
-              "laravel": {{ laravel_find.stdout | default('') | to_json }},
-              "spring": {{ spring_find.stdout | default('') | to_json }},
-              "generic_webfiles": {{ generic_webfiles.stdout | default('') | to_json }}
-            },
-            "metrics": {
-              "loadavg": "{{ loadavg_out.stdout | default('') }}",
-              "top_cpu": {{ top_cpu.stdout | default('') | to_json }},
-              "top_mem": {{ top_mem.stdout | default('') | to_json }},
-              "df": {{ df_out.stdout | default('') | to_json }}
-            },
-            "balancers_hints": {
-              "aws_elb_hint": "{{ aws_elb_hint | default('') }}",
-              "xff_logs_example": {{ xff_logs.stdout | default('') | to_json }}
-            },
-            "inventory_tags": {{ inventory_tags | to_json }},
-            "notes": "Playbook generado para inventario completo. Muchas comprobaciones son heurísticas y dependen de utilidades instaladas en el host."
+            "websockets": {{ websockets_detected | to_json }}
           }
+      mode: '0644'
 
-    ####################################################################
-    # CREAR CSV COMPACTO (una línea por host)
-    ####################################################################
-    - name: Crear CSV (una línea por host)
+    ###############
+    # SALIDA CSV (una línea por host)
+    ###############
+    - name: Crear CSV compacto por host
       copy:
         dest: "{{ reporte_csv }}"
         content: |
-          inventory_hostname,hostname,fqdn,ip_privada,ip_publica,os,kernel,vcpu,ram_gb,discos,web_servers,apps_detected,websockets_hint,loadavg,top_cpu_lines
+          inventory_hostname,hostname,fqdn,ip_privada,ip_publica,os,kernel,vcpu,ram_gb,disco_total_gb,provider,region,services_count,packages_sample,web_servers,apps_detected,websockets_hint
           {{ inventory_hostname }},
           "{{ hostname_out.stdout | default('') | replace(',',';') }}",
           "{{ fqdn_out.stdout | default('') | replace(',',';') }}",
-          "{{ (ip_privadas.stdout | default('')) | replace('\n',' ') | replace(',',';') }}",
+          "{{ ip_privadas.stdout | default('') | replace('\n',' ') }}",
           "{{ ip_publica.stdout | default('') }}",
-          "{{ (os_release_out.stdout | default('')) | replace('\n',' ') | replace(',',';') }}",
+          "{{ os_out.stdout | default('') | replace(',',';') }}",
           "{{ kernel_out.stdout | default('') }}",
           "{{ vcpu_out.stdout | default('') }}",
-          "{% set m = mem_out.stdout | regex_search('Mem:\\s+(\\d+)') %}{{ m if m is not none else '' }}",
-          "{{ (lsblk_out.stdout | default('')) | replace('\n',' | ') | replace(',',';') }}",
+          "{{ ram_gb | default('') }}",
+          "{{ disco_total_gb | default('') }}",
+          "{{ cloud_provider }}",
+          "{{ cloud_region | default('') }}",
+          "{{ (systemd_running.stdout_lines | default([]) | length) }}",
+          "{{ (packages_list.stdout | default('')) | replace('\n',' | ') | replace(',',';') | truncate(200) }}",
           "{{ ( (nginx_ver.stderr | default('')) ~ ' ' ~ (apache_ver.stdout | default('')) ) | replace(',',';') }}",
-          "{{ ( (wordpress_find.stdout|default('')) + '|' + (moodle_find.stdout|default('')) + '|' + (django_find.stdout|default('')) + '|' + (node_find.stdout|default('')) ) | replace('\n',';') | replace(',',';') }}",
-          "{{ (heuristics_websockets | join(' || ') ) | replace('\n',';') | default('') }}",
-          "{{ (loadavg_out.stdout | default('')) | replace('\n',' ') }}",
-          "{{ (top_cpu.stdout | default('')) | replace('\n',' \\n ') | replace(',',';') }}"
+          "{{ apps_detected.stdout | default('') | replace('\n',';') | replace(',',';') }}",
+          "{{ (websockets_detected | join(' || ')) | replace('\n',';') | replace(',',';') }}"
 
+    ###############
+    # COPIAR ARCHIVOS AL CONTROLADOR AWX (fetch)
+    ###############
+    - name: Copiar CSV al controlador AWX (fetch)
+      fetch:
+        src: "{{ reporte_csv }}"
+        dest: "{{ awx_base_dir }}/{{ inventory_hostname }}/"
+        flat: yes
+      failed_when: false
 
-    ####################################################################
+    - name: Copiar JSON al controlador AWX (fetch)
+      fetch:
+        src: "{{ reporte_json }}"
+        dest: "{{ awx_base_dir }}/{{ inventory_hostname }}/"
+        flat: yes
+      failed_when: false
+
+    ###############
     # LIMPIEZA TEMPORAL
-    ####################################################################
-    - name: Eliminar directorio temporal
+    ###############
+    - name: Eliminar archivos temporales en el host
       file:
         path: "{{ tmp_dir }}"
         state: absent
       ignore_errors: true
 
   post_tasks:
-    - name: Mostrar rutas generadas (AWX friendly)
+    - name: Informar rutas generadas (controlador)
       debug:
         msg:
-          - "JSON guardado en: {{ reporte_json }}"
-          - "CSV guardado en: {{ reporte_csv }}"
+          - "JSON guardado en el host remoto: {{ reporte_json }}"
+          - "CSV guardado en el host remoto: {{ reporte_csv }}"
+          - "Archivos copiados al controlador AWX en: {{ awx_base_dir }}/{{ inventory_hostname }}/"
 
-  # end play
+# end play
