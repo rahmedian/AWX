@@ -5,35 +5,39 @@
   become: yes
 
   vars:
-    salida_dir: "./"
-    archivo_json: "inventario_basico_inventory_hostname.json"
-    archivo_csv: "inventario_basico_inventory_hostname.csv"
+    salida_dir: "/runner/project/salida"
+    archivo_json: "inventario_basico.json"
+    archivo_csv: "inventario_basico.csv"
 
   tasks:
 
-    - name: Crear directorio de salida
+    # ---------------------------------------------------------
+    # 0. Crear directorio de salida en el controlador (AWX)
+    # ---------------------------------------------------------
+    - name: Crear directorio de salida en el controlador
       file:
         path: "{{ salida_dir }}"
         state: directory
         mode: '0755'
       delegate_to: localhost
+      run_once: true
       become: false
 
-    # ----------------------------------------------------------------------
+    # ---------------------------------------------------------
     # 1. LISTA DE IPS
-    # ----------------------------------------------------------------------
+    # ---------------------------------------------------------
     - name: Construir lista de IPs
       set_fact:
         ips_list: "{{ ansible_all_ipv4_addresses | default([]) }}"
 
-    - name: Obtener IP primaria
+    - name: Definir IP primaria
       set_fact:
         primary_ip: "{{ ips_list[0] if ips_list | length > 0 else '' }}"
 
-    # ----------------------------------------------------------------------
-    # 2. DISCO TOTAL EN GB
-    # ----------------------------------------------------------------------
-    - name: Calcular disco total en GB (a partir de mounts)
+    # ---------------------------------------------------------
+    # 2. CÁLCULO DE DISCO TOTAL
+    # ---------------------------------------------------------
+    - name: Calcular disco total en GB (sumando mounts)
       set_fact:
         disk_total_gb: >-
           {{
@@ -47,10 +51,10 @@
             if ansible_mounts is defined else 0
           }}
 
-    # ----------------------------------------------------------------------
+    # ---------------------------------------------------------
     # 3. INVENTARIO POR HOST
-    # ----------------------------------------------------------------------
-    - name: Construir diccionario del inventario por host
+    # ---------------------------------------------------------
+    - name: Construir diccionario de inventario por host
       set_fact:
         host_inventory:
           hostname: "{{ ansible_nodename | default(inventory_hostname) }}"
@@ -65,44 +69,38 @@
           disk_total_gb: "{{ disk_total_gb }}"
           connection: "{{ ansible_connection | default('ssh') }}"
 
-    # ----------------------------------------------------------------------
-    # 4. CONSTRUIR INVENTARIO GLOBAL
-    # ----------------------------------------------------------------------
-    - name: Agregar host a lista global
+    # ---------------------------------------------------------
+    # 4. AGREGAR A INVENTARIO GLOBAL (en controlador)
+    # ---------------------------------------------------------
+    - name: Agregar host al inventario global
       set_fact:
         inventario_global: "{{ (inventario_global | default([])) + [ host_inventory ] }}"
+      delegate_to: localhost
       run_once: false
+      become: false
 
-    # ----------------------------------------------------------------------
-    # 5. GUARDAR JSON (solo una vez)
-    # ----------------------------------------------------------------------
-    - name: Guardar inventario completo en JSON
+    # ---------------------------------------------------------
+    # 5. GENERAR JSON (solo una vez)
+    # ---------------------------------------------------------
+    - name: Guardar inventario global en JSON
       copy:
         dest: "{{ salida_dir }}/{{ archivo_json }}"
         content: "{{ inventario_global | to_nice_json }}"
       delegate_to: localhost
       run_once: true
+      become: false
 
-    # ----------------------------------------------------------------------
-    # 6. GUARDAR CSV (solo una vez)
-    # ----------------------------------------------------------------------
-    - name: Generar CSV
+    # ---------------------------------------------------------
+    # 6. GENERAR CSV (solo una vez)
+    # ---------------------------------------------------------
+    - name: Guardar inventario global en CSV
       copy:
         dest: "{{ salida_dir }}/{{ archivo_csv }}"
         content: |
           hostname,fqdn,os,kernel,uptime_seconds,primary_ip,ips,cpu_cores,memory_mb,disk_total_gb,connection
           {% for item in inventario_global %}
-          {{ item.hostname }},
-          {{ item.fqdn }},
-          {{ item.os }},
-          {{ item.kernel }},
-          {{ item.uptime_seconds }},
-          {{ item.primary_ip }},
-          "{{ item.ips | join(' ') }}",
-          {{ item.cpu_cores }},
-          {{ item.memory_mb }},
-          {{ item.disk_total_gb }},
-          {{ item.connection }}
+          {{ item.hostname }},{{ item.fqdn }},{{ item.os }},{{ item.kernel }},{{ item.uptime_seconds }},{{ item.primary_ip }},"{{ item.ips | join(' ') }}",{{ item.cpu_cores }},{{ item.memory_mb }},{{ item.disk_total_gb }},{{ item.connection }}
           {% endfor %}
       delegate_to: localhost
       run_once: true
+      become: false
