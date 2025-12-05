@@ -5,7 +5,7 @@
   become: false
 
   vars:
-    salida_dir: "/runner/project/salida"
+    salida_dir: "/tmp/"
     archivo_json: "inventario_basico.json"
     archivo_csv: "inventario_basico.csv"
 
