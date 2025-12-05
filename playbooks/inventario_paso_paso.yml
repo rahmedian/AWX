@@ -2,10 +2,10 @@
 - name: Inventario básico de servidores
   hosts: all
   gather_facts: yes
-  become: false
+  become: yes
 
   vars:
-    salida_dir: "/tmp/"
+    salida_dir: "/tmp"
     archivo_json: "inventario_basico.json"
     archivo_csv: "inventario_basico.csv"
 
