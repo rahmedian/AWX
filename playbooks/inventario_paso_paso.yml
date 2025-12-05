@@ -5,9 +5,9 @@
   become: yes
 
   vars:
-    salida_dir: "/tmp"
-    archivo_json: "inventario_basico.json"
-    archivo_csv: "inventario_basico.csv"
+    salida_dir: "./"
+    archivo_json: "inventario_basico_inventory_hostname.json"
+    archivo_csv: "inventario_basico_inventory_hostname.csv"
 
   tasks:
 
